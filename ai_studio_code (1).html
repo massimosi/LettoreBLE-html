@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Greggie Smart - BLE Tag Reader</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background-color: #eef2f7; color: #333; }
+        .container { background-color: #fff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); max-width: 600px; margin: 20px auto; }
+        h1 { color: #2c3e50; text-align: center; margin-bottom: 25px; }
+        p { line-height: 1.6; }
+        button { background-color: #4CAF50; color: white; padding: 12px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; margin-bottom: 25px; width: 100%; box-sizing: border-box; transition: background-color 0.3s ease; }
+        button:hover { background-color: #45a049; }
+        #devicesList { margin-top: 20px; }
+        .device-card { border: 1px solid #dcdcdc; padding: 15px; margin-bottom: 15px; border-radius: 10px; background-color: #fcfcfc; box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
+        .device-card h3 { margin-top: 0; color: #34495e; border-bottom: 1px solid #eee; padding-bottom: 10px; margin-bottom: 15px; }
+        .data-label { font-weight: 600; color: #555; display: inline-block; width: 120px; }
+        .rssi-good { color: #28a745; font-weight: bold; } /* Green */
+        .rssi-medium { color: #ffc107; font-weight: bold; } /* Yellow/Orange */
+        .rssi-bad { color: #dc3545; font-weight: bold; } /* Red */
+        .battery-icon { display: inline-block; width: 16px; height: 16px; margin-right: 5px; vertical-align: middle; }
+        .battery-level-100 { background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="green"><path d="M17 4h-3V2h-4v2H7v18h10V4z"/></svg>'); }
+        .battery-level-75 { background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="orange"><path d="M17 4h-3V2h-4v2H7v18h10V4zM10 18v-5h4v5h-4z"/></svg>'); }
+        .battery-level-50 { background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="orange"><path d="M17 4h-3V2h-4v2H7v18h10V4zM10 18v-8h4v8h-4z"/></svg>'); }
+        .battery-level-25 { background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="red"><path d="M17 4h-3V2h-4v2H7v18h10V4zM10 18v-11h4v11h-4z"/></svg>'); }
+        .battery-level-0 { background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="red"><path d="M17 4h-3V2h-4v2H7v18h10V4zM10 18v-14h4v14h-4z"/></svg>'); }
+        .flag-low-bat { color: #ff6347; font-weight: bold; }
+        .flag-critical-bat { color: #dc143c; font-weight: bold; }
+        .flag-cold-warn { color: #4682b4; }
+        .flag-cold-critical { color: #1e90ff; font-weight: bold; }
+        .flag-cold-shutdown { color: #000080; font-weight: bold; }
+        .error-message { color: #dc3545; font-weight: bold; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Greggie Smart - BLE Tag Reader</h1>
+        <p>Utilizza Chrome su Android (o un browser con supporto Web Bluetooth su HTTPS).</p>
+        <button id="scanButton">Avvia Scansione BLE</button>
+        <div id="devicesList">
+            <p>Nessun tag Greggie Smart rilevato...</p>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const scanButton = document.getElementById('scanButton');
+            const devicesList = document.getElementById('devicesList');
+            let scanning = false;
+            let currentWatcher = null; // Per gestire il watcher degli annunci
+
+            scanButton.addEventListener('click', async () => {
+                if (!navigator.bluetooth) {
+                    alert('Web Bluetooth non è supportato in questo browser o non è abilitato. Assicurati di essere su Chrome Android e su HTTPS.');
+                    return;
+                }
+
+                if (scanning) {
+                    // Se già in scansione, interrompiamo il watcher esistente
+                    if (currentWatcher) {
+                        currentWatcher.removeEventListener('advertisementreceived', handleAdvertisement);
+                        // Non c'è un metodo 'stop' per watchAdvertisements su tutti i browser,
+                        // ma rimuovere l'event listener è il modo per non elaborare più i dati.
+                        currentWatcher = null;
+                        console.log('Scansione interrotta.');
+                    }
+                    scanning = false;
+                    scanButton.textContent = 'Avvia Scansione BLE';
+                    devicesList.innerHTML = '<p>Scansione interrotta.</p>';
+                    return;
+                }
+
+                scanning = true;
+                scanButton.textContent = 'Scansione in corso... (clicca per fermare)';
+                devicesList.innerHTML = '<p>Ricerca tag Greggie Smart...</p>';
+
+                try {
+                    // Richiedi un dispositivo generico per ottenere il permesso di scansionare gli annunci
+                    const device = await navigator.bluetooth.requestDevice({
+                        acceptAllDevices: true, // Vediamo tutti i dispositivi
+                        optionalAdvertisements: ['manufacturerData'] // Chiedi i dati del produttore
+                    });
+
+                    // Iniziamo a guardare gli annunci di tutti i dispositivi dopo aver ottenuto il permesso
+                    // Questa è la chiave per la scansione continua senza dover selezionare ogni volta.
+                    // Nota: `watchAdvertisements()` è un metodo sperimentale e la sua implementazione
+                    // può variare o non essere disponibile su tutti i browser.
+                    // Su Chrome Android, dovrebbe funzionare.
+
+                    if (device.watchingAdvertisements) {
+                         // Se stiamo già guardando, non facciamo nulla.
+                         // Questo è un fallback nel caso in cui la chiamata a requestDevice()
+                         // ritorni un device che sta già guardando gli annunci da una precedente esecuzione.
+                         console.log("Già in ascolto degli annunci.");
+                    } else if (device.watchAdvertisements) {
+                        device.addEventListener('advertisementreceived', handleAdvertisement);
+                        await device.watchAdvertisements();
+                        currentWatcher = device; // Memorizza il riferimento al watcher
+                        console.log('In ascolto degli annunci BLE...');
+                    } else {
+                        console.warn('watchAdvertisements non supportato. La scansione potrebbe non essere continua.');
+                        alert('Il tuo browser potrebbe non supportare watchAdvertisements per una scansione continua. Potresti vedere solo annunci limitati.');
+                        // Fallback per browser che non supportano watchAdvertisements
+                        device.addEventListener('advertisementreceived', handleAdvertisement);
+                        // Continuiamo ad aggiungere l'handler, ma la scansione potrebbe essere meno affidabile.
+                        currentWatcher = device;
+                    }
+
+                } catch (error) {
+                    console.error('Errore durante la scansione BLE:', error);
+                    alert(`Impossibile avviare la scansione BLE. Errore: ${error.message}. Assicurati di essere su HTTPS e di concedere i permessi.`);
+                    scanning = false;
+                    scanButton.textContent = 'Avvia Scansione BLE';
+                    devicesList.innerHTML = `<p class="error-message">Errore: ${error.message}</p>`;
+                }
+            });
+
+            // Mappa per tenere traccia dei dispositivi e aggiornare solo quelli esistenti
+            const discoveredDevices = new Map();
+
+            function getBatteryIcon(percentage) {
+                if (percentage >= 80) return 'battery-level-100';
+                if (percentage >= 50) return 'battery-level-75';
+                if (percentage >= 20) return 'battery-level-50';
+                if (percentage > 0) return 'battery-level-25';
+                return 'battery-level-0';
+            }
+
+            function getBatteryFlagDescription(flags) {
+                let description = [];
+                if (flags & 0x01) description.push('<span class="flag-low-bat">Batteria Bassa</span>');
+                if (flags & 0x02) description.push('<span class="flag-critical-bat">BATTERIA CRITICA</span>');
+                if (flags & 0x04) description.push('<span class="flag-cold-warn">Temp. Bassa</span>');
+                if (flags & 0x08) description.push('<span class="flag-cold-critical">TEMP. CRITICA</span>');
+                if (flags & 0x10) description.push('<span class="flag-cold-shutdown">STOP FREDDO</span>');
+                return description.join(' | ');
+            }
+
+            function handleAdvertisement(event) {
+                const device = event.device;
+                const rssi = event.rssi;
+                const manufacturerData = event.manufacturerData;
+
+                let decodedData = null;
+                let isGreggieSmartTag = false;
+
+                // Cerca i dati del produttore con Company ID 0xFFFF
+                if (manufacturerData && manufacturerData.has(0xFFFF)) {
+                    const dataView = manufacturerData.get(0xFFFF);
+                    // Il tuo payload inizia con 0xA1, seguito dai 17 byte
+                    // Nel DataView, i due byte 0xFF, 0xFF del Company ID sono già "consumati"
+                    // quindi il tuo payload inizia dall'offset 0 del DataView.
+                    // Controlliamo che il primo byte sia 0xA1 e che la lunghezza sia sufficiente (17 byte).
+                    if (dataView.byteLength >= 17 && dataView.getUint8(0) === 0xA1) {
+                        isGreggieSmartTag = true;
+                        decodedData = {};
+                        try {
+                            decodedData.magicByte    = dataView.getUint8(0);
+                            decodedData.deviceId     = `0x${dataView.getUint32(1, false).toString(16).toUpperCase().padStart(8, '0')}`; // Big-endian
+                            decodedData.batteryMv    = dataView.getUint16(5, false); // Big-endian
+                            decodedData.batteryPct   = dataView.getUint8(7);
+                            decodedData.batFlags     = dataView.getUint8(8);
+                            decodedData.bootCount    = dataView.getUint16(9, false); // Big-endian
+                            decodedData.txVolatile   = dataView.getUint16(11, false); // Big-endian
+                            decodedData.tempAvg      = dataView.getInt8(13); // Signed 8-bit integer
+                            // decodedData.signature (3 bytes) non è strettamente necessario per la visualizzazione qui
+                            // ma potresti leggerlo con getUint8(14), getUint8(15), getUint8(16)
+                        } catch (e) {
+                            console.error("Errore durante la decodifica dei dati Greggie Smart:", e);
+                            isGreggieSmartTag = false; // Problema nella decodifica, non è il nostro tag
+                            decodedData = null;
+                        }
+                    }
+                }
+
+                if (!isGreggieSmartTag) {
+                    // Filtra dispositivi che non sono i nostri tag Greggie Smart
+                    // console.log(`Dispositivo non Greggie Smart o dati non validi: ${device.name || device.id}`);
+                    return;
+                }
+
+                // Genera un ID più leggibile per l'elemento HTML, usando il deviceId decodificato
+                // L'ID del dispositivo BLE fornito dal browser è un ID casuale, non il MAC.
+                // Usiamo il deviceId decodificato come riferimento interno.
+                const uniqueDisplayId = decodedData.deviceId;
+                let deviceElement = document.getElementById(`device-${uniqueDisplayId}`);
+
+                if (!deviceElement) {
+                    deviceElement = document.createElement('div');
+                    deviceElement.id = `device-${uniqueDisplayId}`;
+                    deviceElement.className = 'device-card';
+                    devicesList.appendChild(deviceElement);
+                    // Rimuovi il messaggio iniziale se è il primo dispositivo
+                    if (devicesList.querySelector('p')) {
+                        devicesList.querySelector('p').remove();
+                    }
+                    discoveredDevices.set(uniqueDisplayId, deviceElement);
+                }
+
+                // Aggiorna l'elemento con i nuovi dati
+                let rssiClass = 'rssi-bad';
+                if (rssi > -60) {
+                    rssiClass = 'rssi-good';
+                } else if (rssi > -80) {
+                    rssiClass = 'rssi-medium';
+                }
+
+                const batteryIconClass = getBatteryIcon(decodedData.batteryPct);
+                const batteryFlagsDescription = getBatteryFlagDescription(decodedData.batFlags);
+
+                deviceElement.innerHTML = `
+                    <h3>Greggie Smart Tag - ${device.name || uniqueDisplayId.substring(2)}</h3>
+                    <p><span class="data-label">Codice Unico:</span> ${decodedData.deviceId}</p>
+                    <p><span class="data-label">RSSI:</span> <span class="${rssiClass}">${rssi} dBm</span></p>
+                    <p><span class="data-label">Batteria:</span> <span class="battery-icon ${batteryIconClass}"></span> ${decodedData.batteryPct}% (${decodedData.batteryMv}mV)</p>
+                    <p><span class="data-label">Temperatura:</span> ${decodedData.tempAvg} °C</p>
+                    <p><span class="data-label">Stato:</span> ${batteryFlagsDescription || 'Nessun Avviso'}</p>
+                    <p><span class="data-label">Boot Count:</span> ${decodedData.bootCount}</p>
+                    <p><span class="data-label">TX Volatile:</span> ${decodedData.txVolatile}</p>
+                    <p><span class="data-label">Ultimo Aggiornamento:</span> ${new Date().toLocaleTimeString()}</p>
+                `;
+            }
+        });
+    </script>
+</body>
+</html>
